@@ -1,0 +1,7 @@
+streamlit==1.26.0
+pandas==2.0.3
+torch==2.0.1
+transformers==4.30.2
+scipy==1.10.1
+imapclient==3.0.0
+python-dotenv==1.0.0
