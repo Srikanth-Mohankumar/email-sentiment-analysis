@@ -12,6 +12,7 @@ import ssl
 import config  # Import credentials from config.py
 from imapclient import IMAPClient
 from email.header import decode_header
+import json
 
 st.set_page_config(page_title="📨 Email Sentiment Analysis", layout="wide")
 
@@ -471,7 +472,7 @@ def parse_email(mail, email_id):
             "Thread": "Error"
         }]
 
-def process_emails(mail, email_ids, max_emails=None):
+def process_emails(mail, email_ids, max_emails=None, export_json=True):
     """Process emails with progress tracking and optional limits."""
     if max_emails and max_emails < len(email_ids):
         email_ids = email_ids[:max_emails]
@@ -507,6 +508,17 @@ def process_emails(mail, email_ids, max_emails=None):
         st.sidebar.text(f"Processing: {i+1}/{len(email_ids)}")
     
     progress_bar.empty()
+
+    # Export to JSON if requested
+    if export_json:
+        json_data = json.dumps(email_data, indent=4)
+        st.download_button(
+            label="Download JSON",
+            file_name="email_data.json",
+            mime="application/json",
+            data=json_data
+        )
+
     return email_data
 
 def save_as_table(emails, output_file=None):
@@ -623,7 +635,7 @@ def main():
                 email_pass = st.text_input("Password", type="password")
 
         with search_tab:
-            subject_query = st.text_input("Subject Keywords", "AA-1510")
+            subject_query = st.text_input("Subject Keywords", "739490")
             date_range = st.date_input(
                 "Date Range",
                 value=(
