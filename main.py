@@ -9,97 +9,743 @@ import email
 import re
 import html
 import ssl
-import config  # Import credentials from config.py
+import openai 
+import config
 from imapclient import IMAPClient
 from email.header import decode_header
 import json
-
-st.set_page_config(page_title="📨 Email Sentiment Analysis", layout="wide")
+import plotly.graph_objects as go
+import plotly.express as px
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# === Load Pre-Trained Model Once (No Redownload) ===
-@st.cache_resource
-def load_model():
-    MODEL_NAME = "distilbert-base-uncased-finetuned-sst-2-english"
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
-    return tokenizer, model
+# === OpenAI GPT-4o-mini Integration ===
+def initialize_openai():
+    """Initialize OpenAI client with API key from config."""
+    openai.api_key = config.OPENAI_API_KEY
 
-tokenizer, model = load_model()
-
-# Define 10-category sentiment labels
-sentiment_labels = [
-    "Highly Dissatisfied (1)", "Very Dissatisfied (2)", "Dissatisfied (3)",
-    "Somewhat Dissatisfied (4)", "Neutral with Concerns (5)", "Completely Neutral (6)",
-    "Somewhat Satisfied (7)", "Satisfied (8)", "Very Satisfied (9)", "Highly Satisfied (10)"
-]
-
-# === Sentiment Analysis Function ===
-def analyze_sentiment(text):
-    if not text or not isinstance(text, str):
-        return "Unknown", "Unknown"  # Handle missing data
+def analyze_sentiment_with_gpt(text):
+    """
+    Advanced sentiment analysis using OpenAI GPT-4o-mini with comprehensive scoring and tone detection.
     
-    # Sentiment analysis (existing logic)
-    tokens = tokenizer(text, return_tensors="pt", truncation=True, padding=True)
-    with torch.no_grad():
-        outputs = model(**tokens)
+    Returns:
+    - Sentiment Score (1-10)
+    - Tone Category
+    - Detailed Sentiment Breakdown
+    """
+    try:
+        # Comprehensive sentiment analysis prompt
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system", 
+                    "content": """You are an advanced email sentiment and tone analyzer. 
+                    Provide a comprehensive analysis with the following details:
+                    
+                    Sentiment Scoring (1-10 Scale):
+                    - 1-4: Negative Sentiments (Highly Dissatisfied to Somewhat Dissatisfied)
+                    - 5: Neutral Sentiments
+                    - 6-10: Positive Sentiments (Somewhat Satisfied to Highly Satisfied)
+                    
+                    Tone Categories:
+                    Positive: Happy, Excited, Grateful, Hopeful
+                    Neutral: Neutral, Curious
+                    Negative: Sad, Frustrated, Angry, Disappointed, Confused
+                    Complex: Skeptical, Urgent, Apologetic, Overwhelmed
+                    Problematic: Sarcastic, Passive-Aggressive, Dismissive, Demanding, Fearful
+                    
+                    Provide a detailed, structured response."""
+                },
+                {
+                    "role": "user", 
+                    "content": f"""Analyze the sentiment and tone of this email text:
+
+                    {text}
+
+                    Please provide:
+                    1. Precise Sentiment Score (1-10)
+                    2. Primary Tone
+                    3. Secondary Tone (if applicable)
+                    4. Key Emotional Indicators
+                    5. Sentiment Category (Negative/Neutral/Positive)
+                    
+                    Response Format:
+                    Sentiment: [Score]
+                    Tone: [Primary Tone]
+                    Secondary Tone: [Optional]
+                    Category: [Sentiment Category]
+                    Indicators: [Key Emotional Words/Phrases]"""
+                }
+            ],
+            max_tokens=250,
+            temperature=0.7  # Slight randomness for nuanced analysis
+        )
+        
+        # Extract and parse the analysis
+        analysis = response.choices[0].message.content.strip()
+        
+        # Advanced parsing with multiple extraction attempts
+        def extract_value(pattern, default='Unknown'):
+            match = re.search(pattern, analysis, re.IGNORECASE)
+            return match.group(1).strip() if match else default
+        
+        # Structured sentiment extraction
+        sentiment_score = extract_value(r'Sentiment:\s*(\d+)', '5')
+        primary_tone = extract_value(r'Tone:\s*(\w+)', 'Neutral')
+        secondary_tone = extract_value(r'Secondary Tone:\s*(\w+)', '')
+        sentiment_category = extract_value(r'Category:\s*(\w+)', 'Neutral')
+        emotional_indicators = extract_value(r'Indicators:\s*(.+)', '')
+        
+        # Standardize sentiment score
+        try:
+            sentiment_score = max(1, min(10, int(sentiment_score)))
+        except ValueError:
+            sentiment_score = 5
+        
+        # Comprehensive sentiment description
+        sentiment_descriptions = {
+            1: "Highly Dissatisfied",
+            2: "Very Dissatisfied",
+            3: "Dissatisfied",
+            4: "Somewhat Dissatisfied",
+            5: "Neutral with Concerns",
+            6: "Completely Neutral",
+            7: "Somewhat Satisfied",
+            8: "Satisfied",
+            9: "Very Satisfied",
+            10: "Highly Satisfied"
+        }
+        
+        # Comprehensive tone categories
+        tone_categories = {
+            "Positive": ["Happy", "Excited", "Grateful", "Hopeful"],
+            "Neutral": ["Neutral", "Curious"],
+            "Negative": ["Sad", "Frustrated", "Angry", "Disappointed", "Confused"],
+            "Complex": ["Skeptical", "Urgent", "Apologetic", "Overwhelmed"],
+            "Problematic": ["Sarcastic", "Passive-Aggressive", "Dismissive", "Demanding", "Fearful"]
+        }
+        
+        # Determine tone category
+        def get_tone_category(tone):
+            for category, tones in tone_categories.items():
+                if tone in tones:
+                    return category
+            return "Neutral"
+        
+        tone_category = get_tone_category(primary_tone)
+        
+        # Construct detailed sentiment result
+        detailed_sentiment = {
+            "score": sentiment_score,
+            "description": sentiment_descriptions[sentiment_score],
+            "primary_tone": primary_tone,
+            "secondary_tone": secondary_tone,
+            "tone_category": tone_category,
+            "sentiment_category": sentiment_category,
+            "emotional_indicators": emotional_indicators
+        }
+        
+        # Format final sentiment output
+        formatted_sentiment = (
+            f"Sentiment ({detailed_sentiment['score']}/10): "
+            f"{detailed_sentiment['description']} | "
+            f"Tone: {detailed_sentiment['primary_tone']} "
+            f"(Category: {detailed_sentiment['tone_category']})"
+        )
+        
+        return formatted_sentiment, detailed_sentiment
     
-    scores = softmax(outputs.logits.numpy())[0]
-    max_index = torch.argmax(outputs.logits).item()
+    except Exception as e:
+        logging.error(f"Advanced OpenAI Sentiment Analysis Error: {e}")
+        return "Neutral (5/10)", {
+            "score": 5,
+            "description": "Neutral with Concerns",
+            "primary_tone": "Neutral",
+            "secondary_tone": "",
+            "tone_category": "Neutral",
+            "sentiment_category": "Neutral",
+            "emotional_indicators": ""
+        }
 
-    if max_index == 0:  # Negative
-        sentiment = sentiment_labels[0]
-    elif max_index == 1:  # Neutral
-        sentiment = sentiment_labels[5]
-    else:  # Positive
-        sentiment = sentiment_labels[9]
+# Optional: Visualization function for sentiment analysis
+def visualize_sentiment_analysis(detailed_sentiment):
+    """
+    Create a visual representation of sentiment analysis results.
+    Can be used in Streamlit or other visualization contexts.
+    """
+    import plotly.graph_objects as plt
+    
+    # Sentiment Score Gauge
+    fig = plt.Figure(go.Indicator(
+        mode = "gauge+number",
+        value = detailed_sentiment['score'],
+        domain = {'x': [0, 1], 'y': [0, 1]},
+        title = {'text': "Sentiment Score"},
+        gauge = {
+            'axis': {'range': [1, 10]},
+            'bar': {'color': "darkblue"},
+            'steps' : [
+                {'range': [1, 4], 'color': "red"},
+                {'range': [4, 6], 'color': "yellow"},
+                {'range': [6, 10], 'color': "green"}
+            ]
+        }
+    ))
+    
+    return fig
 
-    # Tone analysis (new logic)
-    tones = [
-        "Happy", "Excited", "Grateful", "Neutral", "Confused", "Sad", "Frustrated", 
-        "Angry", "Disappointed", "Sarcastic", "Passive-Aggressive", "Urgent", 
-        "Hopeful", "Skeptical", "Demanding", "Apologetic", "Fearful", "Curious", 
-        "Overwhelmed", "Dismissive"
-    ]
+def generate_reply_draft_with_gpt(text, sentiment, tone):
+    """Generate reply draft using OpenAI GPT-4o-mini."""
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a professional email response drafter. Create a thoughtful, professional email reply based on the original email's content, sentiment, and tone."},
+                {"role": "user", "content": f"Original Email Content:\n{text}\n\nSentiment: {sentiment}\nTone: {tone}\n\nDraft a professional email response that addresses the content, reflects the sentiment, and matches the tone."}
+            ],
+            max_tokens=300
+        )
+        
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logging.error(f"OpenAI Reply Draft Error: {e}")
+        return "Unable to generate reply draft. Please draft manually."
 
-    # Simple rule-based tone classification (can be replaced with a model)
-    tone = "Neutral"  # Default tone
-    if "thank" in text.lower() or "grateful" in text.lower():
-        tone = "Grateful"
-    elif "urgent" in text.lower() or "immediately" in text.lower():
-        tone = "Urgent"
-    elif "sorry" in text.lower() or "apologize" in text.lower():
-        tone = "Apologetic"
-    elif "happy" in text.lower() or "excited" in text.lower():
-        tone = "Happy"
-    elif "frustrated" in text.lower() or "angry" in text.lower():
-        tone = "Frustrated"
-    elif "confused" in text.lower() or "unsure" in text.lower():
-        tone = "Confused"
-    elif "hope" in text.lower() or "wish" in text.lower():
-        tone = "Hopeful"
-    elif "demand" in text.lower() or "require" in text.lower():
-        tone = "Demanding"
-    elif "sad" in text.lower() or "disappointed" in text.lower():
-        tone = "Sad"
-    elif "sarcastic" in text.lower() or "passive-aggressive" in text.lower():
-        tone = "Sarcastic"
-    elif "fear" in text.lower() or "worried" in text.lower():
-        tone = "Fearful"
-    elif "curious" in text.lower() or "wonder" in text.lower():
-        tone = "Curious"
-    elif "overwhelmed" in text.lower() or "too much" in text.lower():
-        tone = "Overwhelmed"
-    elif "dismiss" in text.lower() or "ignore" in text.lower():
-        tone = "Dismissive"
+def validate_draft_with_gpt(original_email, draft_reply):
+    """
+    Use GPT to validate the draft reply against the original email
+    and provide feedback on completeness and relevance.
+    """
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system", 
+                    "content": "You are a professional email communication validator. Analyze the original email and proposed reply draft."
+                },
+                {
+                    "role": "user", 
+                    "content": f"""
+                    Original Email:
+                    {original_email}
 
-    return sentiment, tone
+                    Proposed Reply Draft:
+                    {draft_reply}
 
-# === Email Processing Functions ===
-logger = logging.getLogger(__name__)
+                    Please provide a analysis in simple terms:
+                    1. Did the reply address all key points in the original email?
+                    2. Are there any missing critical information or unanswered questions?
+                    3. Does the tone and sentiment match the original email?
+                    4. Provide a confidence score (0-100) for the draft's effectiveness.
+                    5. Suggest specific improvements if needed.
+
+                    Write a final draft:
+                    1. write a final draft with proper fomrat with address all queries, explicit request and future request:
+
+                    Format your response clearly with sections for each analysis point.
+
+                    """
+                }
+            ],
+            max_tokens=300
+        )
+        
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logging.error(f"Draft Validation Error: {e}")
+        return f"Validation Error: {str(e)}"
+
+def email_reply_drafting_tab(st, session_state):
+    st.header("Draft Email Reply: AI-Powered Workflow")
+    
+    if 'email_data' not in session_state or not session_state['email_data']:
+        st.warning("Please extract and analyze emails first.")
+        return
+
+    # Step 1: Email Content Selection
+    st.subheader("📧 Select Email Content")
+    
+    # Option to select from previous emails or manual input
+    content_source = st.radio(
+        "Choose Email Content Source", 
+        ["Select from Previous Emails", "Manual Input"],
+        key="content_source_selector"
+    )
+    
+    if content_source == "Select from Previous Emails":
+        email_df = pd.DataFrame(session_state['email_data'])
+        selected_email_index = st.selectbox(
+            "Select an Email", 
+            range(len(email_df)),
+            format_func=lambda x: f"{email_df.iloc[x]['From']} - {email_df.iloc[x]['Subject']}",
+            key="previous_email_selection"
+        )
+        original_email_content = email_df.iloc[selected_email_index]['Body']
+    else:
+        original_email_content = st.text_area(
+            "Enter Email Content", 
+            height=200, 
+            placeholder="Paste the original email content here...",
+            key="manual_email_input"
+        )
+    
+    # Step 2: Reply Draft Generation
+    st.subheader("✍️ Reply Draft Generation")
+    draft_method = st.radio(
+        "Choose Draft Method", 
+        ["Auto-Generate AI Draft", "Manual Draft"],
+        key="draft_method_selector"
+    )
+    
+    draft_content = ""
+    
+    if draft_method == "Auto-Generate AI Draft":
+        # Automatic AI Draft Generation
+        if st.button("Generate AI Draft", key="generate_ai_draft"):
+            if original_email_content:
+                # Analyze sentiment first
+                sentiment, tone = analyze_sentiment_with_gpt(original_email_content)
+                
+                # Extract requests
+                explicit_requests, future_requests = extract_requests(original_email_content)
+                
+                # Generate AI reply draft with more context
+                draft_content = generate_reply_draft_with_gpt(
+                    original_email_content, 
+                    sentiment, 
+                    tone
+                )
+                
+                # Display generated draft immediately
+                st.subheader("🤖 AI Generated Draft")
+                st.text_area(
+                    "Generated Draft", 
+                    value=draft_content, 
+                    height=250,
+                    key="ai_generated_draft"
+                )
+                
+                # Store draft in session state
+                session_state['draft_content'] = draft_content
+            else:
+                st.warning("Please enter email content first.")
+    else:
+        # Manual Draft Input with inline editing
+        draft_content = st.text_area(
+            "Write Your Draft Reply", 
+            height=250,
+            placeholder="Type your manual reply draft here...",
+            key="manual_draft_input"
+        )
+        session_state['draft_content'] = draft_content
+    
+    # Step 3: Draft Verification (Simplified for Manual Drafts)
+    if session_state.get('draft_content'):
+        st.subheader("🔍 Draft Verification")
+        
+        if draft_method == "Manual Draft":
+            # Quick verification for manual drafts
+            if st.button("Quick Validate", key="quick_validate_button"):
+                validation_result = validate_draft_with_gpt(
+                    original_email_content, 
+                    session_state['draft_content']
+                )
+                
+                # Display concise validation
+                st.markdown("### Quick Validation")
+                st.markdown(validation_result)
+                
+                # Correction Input
+                correction_input = st.text_area(
+                    "Suggest Corrections", 
+                    height=100,
+                    placeholder="Enter any specific improvements or corrections...",
+                    key="draft_correction_input"
+                )
+                
+                # Apply Corrections Button
+                if st.button("Apply Corrections", key="apply_corrections_button"):
+                    if correction_input:
+                        # Use GPT to help refine the draft based on user corrections
+                        refined_draft = generate_reply_draft_with_gpt(
+                            session_state['draft_content'] + "\n\nUser Suggestions: " + correction_input,
+                            "Neutral (5/10)",
+                            "Neutral"
+                        )
+                        
+                        # Update draft in session state and UI
+                        session_state['draft_content'] = refined_draft
+                        st.text_area(
+                            "Refined Draft", 
+                            value=refined_draft, 
+                            height=250,
+                            key="refined_draft_output"
+                        )
+        
+        # Finalization Options
+        st.subheader("📥 Finalize Draft")
+        finalize_choice = st.radio(
+            "Draft Status", 
+            ["Ready to Send", "Need More Work"],
+            key="finalize_draft_radio"
+        )
+        
+        if finalize_choice == "Ready to Send":
+            # Final draft download
+            st.download_button(
+                label="📥 Download Final Draft",
+                data=session_state['draft_content'],
+                file_name="final_email_reply.txt",
+                mime="text/plain",
+                key="download_final_draft"
+            )
+
+def email_analysis_tab(st, session_state):
+    st.header("Analyze Emails")
+    
+    if 'email_data' not in session_state or not session_state['email_data']:
+        st.warning("Please extract emails first in the Extraction tab.")
+        return
+
+    # Create a DataFrame from extracted emails
+    email_df = pd.DataFrame(session_state['email_data'])
+    
+    # Select email for detailed analysis
+    selected_email_index = st.selectbox(
+        "Select an Email for Analysis", 
+        range(len(email_df)),
+        format_func=lambda x: f"{email_df.iloc[x]['From']} - {email_df.iloc[x]['Subject']}"
+    )
+    
+    # Display selected email details
+    selected_email = email_df.iloc[selected_email_index]
+    st.subheader("Selected Email Details")
+    st.write(f"**From:** {selected_email['From']}")
+    st.write(f"**To:** {selected_email['To']}")
+    st.write(f"**Subject:** {selected_email['Subject']}")
+    st.write(f"**Date:** {selected_email['Date']} {selected_email['Time']}")
+    
+    # Email body with verification
+    st.text_area("Email Body", value=selected_email['Body'], height=200, key="verified_body")
+    
+    # Perform sentiment analysis
+    if st.button("Analyze Sentiment", key="sentiment_analysis"):
+        # Use the enhanced sentiment analysis function
+        sentiment, detailed_sentiment = analyze_sentiment_with_gpt(selected_email['Body'])
+        
+        # Create two columns for sentiment details and visualization
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            st.subheader("Sentiment Analysis Results")
+            st.write(f"**Overall Sentiment:** {sentiment}")
+            
+            # Display detailed sentiment information
+            st.markdown("#### Detailed Breakdown")
+            st.write(f"**Score:** {detailed_sentiment['score']}/10")
+            st.write(f"**Description:** {detailed_sentiment['description']}")
+            st.write(f"**Primary Tone:** {detailed_sentiment['primary_tone']}")
+            st.write(f"**Tone Category:** {detailed_sentiment['tone_category']}")
+            
+            if detailed_sentiment['secondary_tone']:
+                st.write(f"**Secondary Tone:** {detailed_sentiment['secondary_tone']}")
+            
+            if detailed_sentiment['emotional_indicators']:
+                st.write("**Emotional Indicators:**")
+                st.code(detailed_sentiment['emotional_indicators'])
+        
+        with col2:
+            st.subheader("Sentiment Visualization")
+            
+            # Sentiment Score Gauge
+            fig = go.Figure(go.Indicator(
+                mode = "gauge+number",
+                value = detailed_sentiment['score'],
+                domain = {'x': [0, 1], 'y': [0, 1]},
+                title = {'text': "Sentiment Score"},
+                gauge = {
+                    'axis': {'range': [1, 10]},
+                    'bar': {'color': "darkblue"},
+                    'steps' : [
+                        {'range': [1, 4], 'color': "red"},
+                        {'range': [4, 6], 'color': "yellow"},
+                        {'range': [6, 10], 'color': "green"}
+                    ]
+                }
+            ))
+            
+            # Display the Plotly figure
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Additional Visualization: Tone Distribution
+            if len(session_state['email_data']) > 1:
+                # Analyze tones across all emails
+                all_tones = []
+                for email in session_state['email_data']:
+                    try:
+                        _, detailed_analysis = analyze_sentiment_with_gpt(email['Body'])
+                        all_tones.append(detailed_analysis['primary_tone'])
+                    except Exception as e:
+                        logging.error(f"Error analyzing tone: {e}")
+                
+                tone_counts = pd.Series(all_tones).value_counts()
+                
+                # Create a pie chart of tone distribution
+                tone_fig = px.pie(
+                    values=tone_counts.values, 
+                    names=tone_counts.index, 
+                    title="Tone Distribution Across Emails"
+                )
+                
+                st.plotly_chart(tone_fig, use_container_width=True)
+
+def thread_sentiment_analysis_tab(st, session_state):
+    """
+    Dedicated tab for comprehensive thread sentiment analysis
+    """
+    st.header("🧵 Thread Sentiment Deep Dive")
+    
+    if 'email_data' not in session_state or not session_state['email_data']:
+        st.warning("Please extract emails first in the Extraction tab.")
+        return
+
+    # Create a DataFrame from extracted emails
+    email_df = pd.DataFrame(session_state['email_data'])
+    
+    # Identify unique threads
+    threads = email_df['Thread'].unique()
+    
+    # Thread selection with additional context
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        selected_thread = st.selectbox(
+            "Select a Thread", 
+            threads,
+            key="thread_sentiment_selector",
+            format_func=lambda x: f"{x} (Emails: {len(email_df[email_df['Thread'] == x])})"
+        )
+    
+    with col2:
+        # Option to show all threads analysis
+        show_all_threads = st.checkbox("Analyze All Threads", key="analyze_all_threads")
+    
+    # Filter emails for the selected thread
+    thread_emails = email_df[email_df['Thread'] == selected_thread]
+    
+    # Perform thread-level sentiment analysis
+    def analyze_thread_sentiment(emails):
+        """
+        Analyze sentiment for an entire email thread and create visualizations.
+        """
+        sentiment_results = []
+        
+        for email in emails.to_dict('records'):
+            try:
+                # Use GPT-powered sentiment analysis
+                sentiment_text, detailed_sentiment = analyze_sentiment_with_gpt(email['Body'])
+                
+                sentiment_results.append({
+                    'From': email['From'],
+                    'Date': email['Date'],
+                    'Sentiment Score': detailed_sentiment['score'],
+                    'Primary Tone': detailed_sentiment['primary_tone'],
+                    'Tone Category': detailed_sentiment['tone_category']
+                })
+            except Exception as e:
+                logger.error(f"Sentiment analysis error: {e}")
+        
+        # Sort results by date
+        sentiment_results = sorted(sentiment_results, key=lambda x: x['Date'])
+        
+        # Visualizations
+        def create_thread_sentiment_chart(sentiment_results):
+            """Create a line chart showing sentiment scores over time"""
+            import plotly.graph_objs as go
+            
+            # Prepare data for the chart
+            dates = [result['Date'] for result in sentiment_results]
+            sentiment_scores = [result['Sentiment Score'] for result in sentiment_results]
+            senders = [result['From'] for result in sentiment_results]
+            primary_tones = [result['Primary Tone'] for result in sentiment_results]
+            
+            # Create the line chart
+            fig = go.Figure()
+            
+            # Add sentiment score line
+            fig.add_trace(go.Scatter(
+                x=dates, 
+                y=sentiment_scores, 
+                mode='lines+markers+text',
+                name='Sentiment Score',
+                text=[f"{sender}: {tone} ({score}/10)" for sender, tone, score in zip(senders, primary_tones, sentiment_scores)],
+                textposition='top center',
+                line=dict(color='blue', width=2),
+                marker=dict(size=10)
+            ))
+            
+            fig.update_layout(
+                title='Thread Sentiment Progression',
+                xaxis_title='Date',
+                yaxis_title='Sentiment Score (1-10)',
+                yaxis=dict(range=[1, 10])
+            )
+            
+            return fig
+        
+        def create_tone_distribution_pie(sentiment_results):
+            """Create a pie chart showing tone distribution in the thread"""
+            import plotly.express as px
+            
+            # Count tone frequencies
+            tone_counts = {}
+            for result in sentiment_results:
+                tone = result['Primary Tone']
+                tone_counts[tone] = tone_counts.get(tone, 0) + 1
+            
+            # Create pie chart
+            tone_df = pd.DataFrame.from_dict(tone_counts, orient='index', columns=['Count']).reset_index()
+            tone_df.columns = ['Tone', 'Count']
+            
+            fig = px.pie(
+                tone_df, 
+                values='Count', 
+                names='Tone', 
+                title='Tone Distribution in Thread'
+            )
+            
+            return fig
+        
+        # Generate visualizations
+        thread_sentiment_chart = create_thread_sentiment_chart(sentiment_results)
+        tone_distribution_chart = create_tone_distribution_pie(sentiment_results)
+        
+        # Aggregate thread-level insights
+        thread_insights = {
+            'Average Sentiment': sum(r['Sentiment Score'] for r in sentiment_results) / len(sentiment_results),
+            'Most Common Tone': max(set(r['Primary Tone'] for r in sentiment_results), key=[r['Primary Tone'] for r in sentiment_results].count),
+            'Sentiment Trend': 'Positive' if sum(r['Sentiment Score'] for r in sentiment_results) / len(sentiment_results) > 6 else 'Negative'
+        }
+        
+        return {
+            'sentiment_results': sentiment_results,
+            'thread_insights': thread_insights,
+            'charts': {
+                'sentiment_chart': thread_sentiment_chart,
+                'tone_distribution': tone_distribution_chart
+            }
+        }
+    
+    # Perform analysis based on selection
+    if show_all_threads:
+        # Analysis for all threads
+        st.subheader("Multi-Thread Sentiment Overview")
+        
+        # Create a summary dataframe of thread sentiments
+        thread_summaries = []
+        
+        for thread in threads:
+            thread_df = email_df[email_df['Thread'] == thread]
+            thread_analysis = analyze_thread_sentiment(thread_df)
+            
+            thread_summaries.append({
+                'Thread': thread,
+                'Avg Sentiment': thread_analysis['thread_insights']['Average Sentiment'],
+                'Most Common Tone': thread_analysis['thread_insights']['Most Common Tone'],
+                'Sentiment Trend': thread_analysis['thread_insights']['Sentiment Trend'],
+                'Email Count': len(thread_df)
+            })
+        
+        # Display thread summaries
+        summary_df = pd.DataFrame(thread_summaries)
+        st.dataframe(summary_df, use_container_width=True)
+        
+        # Optional: Visualize thread sentiments
+        if st.checkbox("Visualize Thread Sentiments", key="visualize_all_threads"):
+            # Bar chart of thread sentiments
+            import plotly.express as px
+            
+            fig = px.bar(
+                summary_df, 
+                x='Thread', 
+                y='Avg Sentiment', 
+                color='Sentiment Trend',
+                title='Average Sentiment Across Threads',
+                labels={'Avg Sentiment': 'Average Sentiment Score'}
+            )
+            st.plotly_chart(fig, use_container_width=True)
+    
+    else:
+        # Analysis for selected thread
+        st.subheader(f"Thread Sentiment Analysis: {selected_thread}")
+        
+        # Display thread emails
+        st.dataframe(thread_emails[['From', 'To', 'Date', 'Time', 'Subject']], use_container_width=True)
+        
+        # Perform thread-level sentiment analysis
+        thread_analysis = analyze_thread_sentiment(thread_emails)
+        
+        # Display thread insights
+        st.subheader("Thread Sentiment Insights")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Average Sentiment", 
+                      f"{thread_analysis['thread_insights']['Average Sentiment']:.2f}/10")
+        
+        with col2:
+            st.metric("Most Common Tone", 
+                      thread_analysis['thread_insights']['Most Common Tone'])
+        
+        with col3:
+            st.metric("Overall Sentiment Trend", 
+                      thread_analysis['thread_insights']['Sentiment Trend'])
+        
+        # Visualizations
+        st.subheader("Sentiment Visualizations")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.plotly_chart(thread_analysis['charts']['sentiment_chart'], use_container_width=True)
+        
+        with col2:
+            st.plotly_chart(thread_analysis['charts']['tone_distribution'], use_container_width=True)
+        
+        # Detailed sentiment results
+        st.subheader("Detailed Sentiment Results")
+        st.dataframe(pd.DataFrame(thread_analysis['sentiment_results']), use_container_width=True)
+
+def process_emails(mail, email_ids, max_emails=None):
+    """Process emails with progress tracking and optional limits."""
+    if max_emails and max_emails < len(email_ids):
+        email_ids = email_ids[:max_emails]
+    
+    progress_bar = st.progress(0)
+    email_data = []
+    
+    for i, eid in enumerate(email_ids):
+        # Update progress
+        progress = (i + 1) / len(email_ids)
+        progress_bar.progress(progress)
+        
+        try:
+            # Parse the email
+            rows = parse_email(mail, eid)
+            email_data.extend(rows)
+        
+        except Exception as email_error:
+            st.error(f"Error processing email {eid}: {email_error}")
+        
+        # Update status
+        st.sidebar.text(f"Processing: {i+1}/{len(email_ids)}")
+    
+    progress_bar.empty()
+    
+    return email_data
 
 def connect_to_email(username, password):
     """Connect to IMAP server via IMAPClient with SSL verification disabled (TEMPORARY)."""
@@ -472,55 +1118,6 @@ def parse_email(mail, email_id):
             "Thread": "Error"
         }]
 
-def process_emails(mail, email_ids, max_emails=None, export_json=True):
-    """Process emails with progress tracking and optional limits."""
-    if max_emails and max_emails < len(email_ids):
-        email_ids = email_ids[:max_emails]
-        
-    progress_bar = st.progress(0)
-    email_data = []
-    
-    for i, eid in enumerate(email_ids):
-        # Update progress
-        progress = (i + 1) / len(email_ids)
-        progress_bar.progress(progress)
-        
-        # Parse the email
-        rows = parse_email(mail, eid)
-        for row in rows:
-            # Analyze sentiment and tone
-            sentiment, tone = analyze_sentiment(row["Body"])
-            # Extract requests
-            explicit_requests, future_requests = extract_requests(row["Body"])
-            # Generate reply draft
-            reply_draft = generate_reply_draft(sentiment, tone, explicit_requests, future_requests)
-            
-            # Add new fields to the row
-            row["Sentiment"] = sentiment
-            row["Tone"] = tone
-            row["Explicit Requests"] = ", ".join(explicit_requests)
-            row["Future Requests"] = ", ".join(future_requests)
-            row["Reply Draft"] = reply_draft  # Add reply draft to the row
-        
-        email_data.extend(rows)
-        
-        # Update status
-        st.sidebar.text(f"Processing: {i+1}/{len(email_ids)}")
-    
-    progress_bar.empty()
-
-    # Export to JSON if requested
-    if export_json:
-        json_data = json.dumps(email_data, indent=4)
-        st.download_button(
-            label="Download JSON",
-            file_name="email_data.json",
-            mime="application/json",
-            data=json_data
-        )
-
-    return email_data
-
 def save_as_table(emails, output_file=None):
     """Convert email data to DataFrame with improved handling."""
     if not emails:
@@ -572,69 +1169,40 @@ def extract_requests(text):
 
     return explicit_requests, future_requests
 
-def generate_reply_draft(sentiment, tone, explicit_requests, future_requests):
-    """Generate a reply draft based on sentiment, tone, and requests."""
-    reply = ""
-
-    # Add tone-specific opening
-    if tone == "Apologetic":
-        reply += "We sincerely apologize for the inconvenience caused. "
-    elif tone == "Grateful":
-        reply += "Thank you for your email. We appreciate your feedback. "
-    elif tone == "Urgent":
-        reply += "Thank you for bringing this to our attention. We will address this immediately. "
-    elif tone == "Frustrated":
-        reply += "We understand your frustration and are working to resolve this issue. "
-    else:
-        reply += "Thank you for your email. "
-
-    # Address explicit requests
-    if explicit_requests:
-        reply += "Regarding your request: "
-        for req in explicit_requests:
-            reply += f"{req} We will look into this and get back to you shortly. "
-
-    # Address future requests
-    if future_requests:
-        reply += "For your future needs: "
-        for req in future_requests:
-            reply += f"{req} We will ensure this is handled in a timely manner. "
-
-    # Add closing based on sentiment
-    if sentiment in ["Highly Dissatisfied (1)", "Very Dissatisfied (2)", "Dissatisfied (3)"]:
-        reply += "We value your feedback and are committed to improving our services. "
-    elif sentiment in ["Highly Satisfied (10)", "Very Satisfied (9)", "Satisfied (8)"]:
-        reply += "We are glad to hear your positive feedback and look forward to serving you again. "
-    else:
-        reply += "Please let us know if there is anything else we can assist you with. "
-
-    reply += "\n\nBest regards,\n[Your Name]"
-    return reply
-
 # === STREAMLIT UI ===
 def main():
-    st.title("📊 Real-Time Sentiment Analysis on Emails")
+    st.set_page_config(page_title="📨 AI Email Assistant", layout="wide")
+    
+    # Initialize OpenAI
+    initialize_openai()
+
+    st.title("🤖 AI Email Sentiment & Reply Assistant")
 
     # Ensure session state for storing extracted emails
     if "email_data" not in st.session_state:
         st.session_state["email_data"] = None
 
-    # Sidebar configuration
-    with st.sidebar:
-        st.header("🔑 Authentication")
-        auth_tab, search_tab, advanced_tab = st.tabs(["Login", "Search", "Advanced"])
+    # Main content area
+    tab1, tab2, tab3, tab4 = st.tabs(["📬 Email Extraction", "🔍 Email Analysis", "✉️ Reply Drafting", "🧵 Thread Sentiment"])
 
-        with auth_tab:
-            use_default = st.checkbox("Use default credentials", value=True)
+    # === EMAIL EXTRACTION TAB ===
+    with tab1:
+        st.header("Extract Emails")
+        
+        # Sidebar for email connection details
+        with st.sidebar:
+            st.subheader("Email Connection")
+            use_default = st.checkbox("Use default credentials", value=True, key="use_default_credentials")
+            
             if use_default:
                 email_user = config.DEFAULT_EMAIL
                 email_pass = config.DEFAULT_PASSWORD
                 st.success("Using saved credentials")
             else:
-                email_user = st.text_input("Email", type="default")
-                email_pass = st.text_input("Password", type="password")
-
-        with search_tab:
+                email_user = st.text_input("Email", type="default", key="email_user_input")
+                email_pass = st.text_input("Password", type="password", key="email_password_input")
+            
+            # Search parameters
             subject_query = st.text_input("Subject Keywords", "739490")
             date_range = st.date_input(
                 "Date Range",
@@ -643,20 +1211,13 @@ def main():
                     datetime.date.today()
                 )
             )
-
-            # Handle single date selection
-            if isinstance(date_range, datetime.date):
-                date_since = date_range
-            else:
-                date_since = date_range[0]
-
+            
             folder = st.selectbox(
                 "Email Folder",
                 ["INBOX", "Sent", "Drafts", "Archive", "Trash"],
                 index=0
             )
-
-        with advanced_tab:
+            
             max_emails = st.number_input(
                 "Max Emails to Process",
                 min_value=1,
@@ -669,111 +1230,60 @@ def main():
                 ["Remove Signatures", "Remove Disclaimers", "Remove Links", "Only Main Content"],
                 default=["Remove Signatures", "Remove Disclaimers"]
             )
+        
+        # Extraction button
+        extract_btn = st.button("🔍 Extract Emails", key="extract_emails")
+        
+        if extract_btn:
+            with st.spinner("Connecting to email server..."):
+                mail = connect_to_email(email_user, email_pass)
+            
+            if mail:
+                with st.spinner(f"Searching for emails with subject '{subject_query}'..."):
+                    email_ids = search_emails(
+                        mail,
+                        subject_query,
+                        date_range[0].strftime("%d-%b-%Y"),
+                        folder=folder
+                    )
 
-    # Main content area
-    col1, col2 = st.columns([1, 1])
+                if email_ids:
+                    st.success(f"Found {len(email_ids)} matching emails!")
 
-    with col1:
-        st.subheader("📋 Extraction Controls")
-        start_btn = st.button("🔍 Extract Emails", type="primary", use_container_width=True)
-
-        if start_btn:
-            if not email_user or not email_pass:
-                st.error("Please enter email credentials!")
-            else:
-                with st.spinner("Connecting to email server..."):
-                    mail = connect_to_email(email_user, email_pass)
-                if mail:
-                    with st.spinner(f"Searching for emails with subject '{subject_query}'..."):
-                        email_ids = search_emails(
+                    with st.spinner("Processing emails..."):
+                        email_data = process_emails(
                             mail,
-                            subject_query,
-                            date_since.strftime("%d-%b-%Y"),
-                            folder=folder
+                            email_ids,
+                            max_emails=max_emails
                         )
 
-                    if email_ids:
-                        st.success(f"Found {len(email_ids)} matching emails!")
-
-                        with st.spinner("Processing emails..."):
-                            email_data = process_emails(
-                                mail,
-                                email_ids,
-                                max_emails=max_emails
-                            )
-
-                        # Convert email data to DataFrame
-                        df = pd.DataFrame(email_data)
-
-                        # Sort emails by date and time to find the most recent one
-                        try:
-                            # Convert Date and Time to datetime for sorting
-                            df["SortDate"] = pd.to_datetime(df["Date"] + " " + df["Time"], errors="coerce")
-                            df = df.sort_values(by=["SortDate"], ascending=False)
-                            df = df.drop(columns=["SortDate"])
-                        except Exception as e:
-                            logger.warning(f"Error sorting by date: {e}")
-                            # Fallback: sort by string comparison
-                            df = df.sort_values(by=["Date", "Time"], ascending=False)
-
-                        # Get the most recent email
-                        most_recent_email = df.iloc[0]
-                        reply_draft = most_recent_email["Reply Draft"]
-
-                        # Save the DataFrame to session state
-                        st.session_state["email_data"] = df
-
-                        # Display extracted email data
-                        st.write("### 📊 Extracted Email Data")
-                        st.dataframe(
-                            df,
-                            height=400,
-                            use_container_width=True
-                        )
-
-                        # Display the reply draft for the most recent email in a separate window
-                        st.write("### ✉️ Reply Draft for the Most Recent Email")
-                        with st.expander("View Reply Draft", expanded=True):  # Expanded by default
-                            st.text_area(
-                                "Reply Draft",
-                                value=reply_draft,
-                                height=300,
-                                key="reply_draft"
-                            )
-
-                        # Download reply draft
-                        st.download_button(
-                            label="📥 Download Reply Draft",
-                            data=reply_draft,
-                            file_name="reply_draft.txt",
-                            mime="text/plain",
-                            key="download-reply-draft"
-                        )
-
-                    else:
-                        st.warning("⚠️ No emails found matching your criteria")
+                    # Store email data in session state
+                    st.session_state['email_data'] = email_data
+                    
+                    # Display extracted emails
+                    st.dataframe(
+                        pd.DataFrame(email_data),
+                        use_container_width=True
+                    )
 
                     # Close the connection
                     mail.logout()
                 else:
-                    st.error("Failed to connect to email server. Check credentials.")
-
-    with col2:
-        st.subheader("📋 Sentiment Analysis Controls")
-        analyze_btn = st.button("🔍 Start Analysis")
-
-        if analyze_btn:
-            if "email_data" not in st.session_state or st.session_state["email_data"] is None or st.session_state["email_data"].empty:
-                st.error("⚠️ No emails found! Extract emails first.")
+                    st.warning("⚠️ No emails found matching your criteria")
             else:
-                with st.spinner("Performing sentiment analysis..."):
-                    email_df = st.session_state["email_data"].copy()  # Use stored DataFrame
-                    email_df["Sentiment"] = email_df["Body"].apply(analyze_sentiment)
+                st.error("Failed to connect to email server. Check credentials.")
 
-                st.success(f"✅ Processed {len(email_df)} emails!")
-                st.dataframe(email_df, height=400, use_container_width=True)
-                st.write("### 📊 Sentiment Distribution")
-                st.bar_chart(email_df["Sentiment"].value_counts())
+    # === EMAIL ANALYSIS TAB ===
+    with tab2:
+        email_analysis_tab(st, st.session_state)
+
+    # === REPLY DRAFTING TAB ===
+    with tab3:
+        email_reply_drafting_tab(st, st.session_state)
+
+    # === THREAD SENTIMENT TAB ===
+    with tab4:
+        thread_sentiment_analysis_tab(st, st.session_state)
 
 if __name__ == "__main__":
     main()
